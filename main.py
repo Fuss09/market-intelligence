@@ -4,10 +4,12 @@ import sys
 from datetime import datetime, timezone
 
 from config import Config
-from alerts.telegram import test_connections, send_crypto_alert, send_system_alert
+from alerts.telegram import test_connections, send_crypto_alert, send_bourse_brief, send_system_alert
 from database.db import init_db, test_connection, close_pool, log_system, save_signal
 from scanners.crypto import run_crypto_scanner
+from scanners.stocks import run_stock_scan
 from analysis.engine import analyze_crypto_signal, format_crypto_alert
+from analysis.morning_brief import generate_morning_brief
 
 
 RUNNING = True
@@ -19,31 +21,26 @@ def handle_shutdown(sig, frame):
     RUNNING = False
 
 
+# ─── Callback crypto ──────────────────────────────────────────────────────────
+
 async def on_crypto_signal(result: dict):
     """
     Callback appelé par le scanner crypto pour chaque signal qualifié.
-    1. Analyse IA
-    2. Formate et envoie l'alerte Telegram
-    3. Sauvegarde en base
     """
     symbol = result["symbol"]
     score = result["score"]
 
-    print(f"[MAIN] Signal qualifié : {symbol} — Score {score}/100")
+    print(f"[MAIN] Signal crypto : {symbol} — Score {score}/100")
 
-    # 1. Enrichissement IA
     result = await analyze_crypto_signal(result)
-
-    # 2. Formatage et envoi Telegram
     message = format_crypto_alert(result)
     sent = await send_crypto_alert(message)
 
     if sent:
-        print(f"[MAIN] Alerte envoyée : {symbol}")
+        print(f"[MAIN] Alerte crypto envoyée : {symbol}")
     else:
-        print(f"[MAIN] ERREUR envoi alerte : {symbol}")
+        print(f"[MAIN] ERREUR envoi alerte crypto : {symbol}")
 
-    # 3. Sauvegarde en base
     ai = result.get("ai", {})
     ticker = result.get("ticker", {})
 
@@ -62,6 +59,87 @@ async def on_crypto_signal(result: dict):
 
     await log_system("INFO", "crypto", f"Signal envoyé : {symbol} score={score}")
 
+
+# ─── Morning brief bourse ─────────────────────────────────────────────────────
+
+async def run_morning_brief():
+    """
+    Lance le scan bourse et génère le morning brief.
+    Appelé automatiquement à l'heure configurée (MORNING_BRIEF_HOUR_UTC).
+    """
+    print("[MAIN] Démarrage du morning brief bourse...")
+    await log_system("INFO", "stocks", "Démarrage morning brief.")
+
+    try:
+        results_by_sector = await run_stock_scan()
+        brief = await generate_morning_brief(results_by_sector)
+        sent = await send_bourse_brief(brief)
+
+        if sent:
+            print("[MAIN] Morning brief envoyé sur FussBourse.")
+            await log_system("INFO", "stocks", "Morning brief envoyé.")
+        else:
+            print("[MAIN] ERREUR envoi morning brief.")
+            await log_system("ERROR", "stocks", "Échec envoi morning brief.")
+
+        # Sauvegarde des signaux bourse en base
+        for sector, signals in results_by_sector.items():
+            for result in signals:
+                ai = result.get("ai", {})
+                quote = result.get("quote", {})
+                await save_signal(
+                    asset=result["symbol"],
+                    asset_type="stock",
+                    score=result["score"],
+                    signals_detected=result["signals"],
+                    price=quote.get("price", 0),
+                    sources=["Yahoo Finance", "Twelve Data"],
+                    ai_analysis=ai.get("catalyseur", ""),
+                    entry_price=ai.get("entree"),
+                    target_price=ai.get("cible"),
+                    stop_price=ai.get("stop"),
+                )
+
+    except Exception as e:
+        error_msg = f"Erreur morning brief : {e}"
+        print(f"[MAIN] {error_msg}")
+        await log_system("ERROR", "stocks", error_msg)
+        await send_system_alert(f"⚠️ {error_msg}")
+
+
+async def schedule_morning_brief():
+    """
+    Scheduler du morning brief.
+    Attend l'heure cible (MORNING_BRIEF_HOUR_UTC:MORNING_BRIEF_MINUTE_UTC)
+    puis lance le brief chaque jour.
+    """
+    while True:
+        now = datetime.now(timezone.utc)
+        target_hour = Config.MORNING_BRIEF_HOUR_UTC
+        target_minute = Config.MORNING_BRIEF_MINUTE_UTC
+
+        # Calcule les secondes jusqu'au prochain déclenchement
+        seconds_until = (
+            (target_hour - now.hour) * 3600
+            + (target_minute - now.minute) * 60
+            - now.second
+        )
+
+        if seconds_until <= 0:
+            seconds_until += 86400  # Demain à la même heure
+
+        next_run = datetime.now(timezone.utc)
+        print(
+            f"[MAIN] Prochain morning brief dans "
+            f"{seconds_until // 3600}h{(seconds_until % 3600) // 60}m "
+            f"(objectif : {target_hour:02d}:{target_minute:02d} UTC)"
+        )
+
+        await asyncio.sleep(seconds_until)
+        await run_morning_brief()
+
+
+# ─── Démarrage ────────────────────────────────────────────────────────────────
 
 async def startup() -> bool:
     print("=" * 50)
@@ -95,17 +173,16 @@ async def startup() -> bool:
     return True
 
 
+# ─── Boucle principale ────────────────────────────────────────────────────────
+
 async def main_loop():
-    """
-    Boucle principale.
-    Lance le scanner crypto en tâche de fond.
-    """
     global RUNNING
 
-    # Lance le scanner crypto
-    crypto_task = asyncio.create_task(
-        run_crypto_scanner(on_crypto_signal)
-    )
+    # Lance le scanner crypto en continu
+    crypto_task = asyncio.create_task(run_crypto_scanner(on_crypto_signal))
+
+    # Lance le scheduler du morning brief
+    brief_task = asyncio.create_task(schedule_morning_brief())
 
     heartbeat_count = 0
 
@@ -113,18 +190,24 @@ async def main_loop():
         await asyncio.sleep(60)
         heartbeat_count += 1
 
-        # Vérifie que la tâche crypto tourne toujours
+        # Surveillance et redémarrage automatique du scanner crypto
         if crypto_task.done():
-            exc = crypto_task.exception()
+            exc = crypto_task.exception() if not crypto_task.cancelled() else None
             if exc:
-                print(f"[MAIN] Scanner crypto arrêté avec erreur : {exc}")
+                print(f"[MAIN] Scanner crypto arrêté : {exc}")
                 await log_system("ERROR", "crypto", f"Scanner arrêté : {exc}")
-                await send_system_alert(f"⚠️ Scanner crypto arrêté : {exc}\nRedémarrage...")
-            # Relance le scanner
-            crypto_task = asyncio.create_task(
-                run_crypto_scanner(on_crypto_signal)
-            )
+                await send_system_alert(f"⚠️ Scanner crypto arrêté. Redémarrage...")
+            crypto_task = asyncio.create_task(run_crypto_scanner(on_crypto_signal))
             print("[MAIN] Scanner crypto redémarré.")
+
+        # Surveillance scheduler morning brief
+        if brief_task.done():
+            exc = brief_task.exception() if not brief_task.cancelled() else None
+            if exc:
+                print(f"[MAIN] Scheduler morning brief arrêté : {exc}")
+                await log_system("ERROR", "stocks", f"Scheduler arrêté : {exc}")
+            brief_task = asyncio.create_task(schedule_morning_brief())
+            print("[MAIN] Scheduler morning brief redémarré.")
 
         # Heartbeat toutes les heures
         if heartbeat_count % 60 == 0:
@@ -133,12 +216,15 @@ async def main_loop():
             await log_system("INFO", "main", f"Heartbeat — {ts}")
 
     # Arrêt propre
-    crypto_task.cancel()
-    try:
-        await crypto_task
-    except asyncio.CancelledError:
-        pass
+    for task in [crypto_task, brief_task]:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
+
+# ─── Shutdown ─────────────────────────────────────────────────────────────────
 
 async def shutdown():
     print("[MAIN] Fermeture des connexions...")
