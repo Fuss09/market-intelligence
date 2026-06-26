@@ -13,6 +13,7 @@ from scanners.government import run_government_scan
 from scanners.news import run_news_scan
 from analysis.engine import analyze_crypto_signal, format_crypto_alert
 from analysis.morning_brief import generate_morning_brief
+from tracking.performance import run_performance_tracker, get_performance_stats, format_performance_report
 
 
 RUNNING = True
@@ -32,13 +33,10 @@ def handle_shutdown(sig, frame):
     RUNNING = False
 
 
-# ─── Mise a jour du cache reglementaire ───────────────────────────────────────
+# ─── Cache reglementaire ──────────────────────────────────────────────────────
 
 async def update_regulatory_cache():
-    """
-    Met a jour les donnees reglementaires en cache.
-    Lance tous les scanners externes en parallele.
-    """
+    """Met a jour les donnees reglementaires en cache."""
     global _regulatory_cache
     print("[MAIN] Mise a jour du cache reglementaire...")
 
@@ -62,7 +60,7 @@ async def update_regulatory_cache():
         await log_system("INFO", "regulatory", "Cache mis a jour.")
 
     except Exception as e:
-        print(f"[MAIN] ERREUR mise a jour cache : {e}")
+        print(f"[MAIN] ERREUR cache : {e}")
         await log_system("ERROR", "regulatory", f"Erreur cache : {e}")
 
 
@@ -70,32 +68,25 @@ async def regulatory_cache_loop():
     """Met a jour le cache reglementaire toutes les heures."""
     while True:
         await update_regulatory_cache()
-        await asyncio.sleep(3600)  # Toutes les heures
+        await asyncio.sleep(3600)
 
 
 # ─── Callback crypto ──────────────────────────────────────────────────────────
 
 async def on_crypto_signal(result: dict):
-    """
-    Callback pour chaque signal crypto qualifie.
-    Enrichit avec les sources externes avant l'analyse IA.
-    """
+    """Callback pour chaque signal crypto qualifie."""
     symbol = result["symbol"]
     score = result["score"]
 
     print(f"[MAIN] Signal crypto : {symbol} - Score {score}/100")
 
-    # Enrichissement avec catalyseurs externes (news uniquement pour crypto)
-    external = []
-    news_by_sector = _regulatory_cache.get("news", {})
-    crypto_news = news_by_sector.get("Crypto", [])
+    # Enrichissement news crypto
+    news_data = _regulatory_cache.get("news", {})
+    crypto_news = news_data.get("Crypto", [])
     base = symbol.replace("USDT", "")
-    for article in crypto_news:
-        if base.upper() in article.get("title", "").upper():
-            external.append(article)
+    external = [a for a in crypto_news if base.upper() in a.get("title", "").upper()]
     result["external_sources"] = external[:2]
 
-    # Analyse IA
     result = await analyze_crypto_signal(result)
     message = format_crypto_alert(result)
     sent = await send_crypto_alert(message)
@@ -124,23 +115,17 @@ async def on_crypto_signal(result: dict):
     await log_system("INFO", "crypto", f"Signal envoye : {symbol} score={score}")
 
 
-# ─── Morning brief bourse ─────────────────────────────────────────────────────
+# ─── Morning brief ────────────────────────────────────────────────────────────
 
 async def run_morning_brief():
-    """
-    Lance le scan bourse complet et envoie le morning brief.
-    Injecte les donnees reglementaires dans le scan.
-    """
+    """Lance le scan bourse et envoie le morning brief."""
     print("[MAIN] Demarrage du morning brief bourse...")
     await log_system("INFO", "stocks", "Demarrage morning brief.")
 
     try:
-        # Mise a jour du cache avant le brief
         await update_regulatory_cache()
-
         results_by_sector = await run_stock_scan()
 
-        # Injection des catalyseurs reglementaires dans les resultats
         clinical_events = _regulatory_cache.get("clinical", [])
         gov_data = _regulatory_cache.get("government", {})
         news_data = _regulatory_cache.get("news", {})
@@ -148,23 +133,24 @@ async def run_morning_brief():
         for sector, signals in results_by_sector.items():
             for result in signals:
                 external = []
-
-                # News du secteur
-                sector_news = news_data.get(sector, [])
-                external.extend(sector_news[:2])
-
-                # Evenements cliniques pour biotech
+                external.extend(news_data.get(sector, [])[:2])
                 if "Biotech" in sector or "Pharma" in sector:
                     external.extend(clinical_events[:3])
-
-                # Contrats gouvernementaux pour defense
                 if "Defense" in sector or "Spatial" in sector:
-                    contracts = gov_data.get("contracts", [])
-                    external.extend(contracts[:2])
-
+                    external.extend(gov_data.get("contracts", [])[:2])
                 result["external_sources"] = external[:4]
 
         brief = await generate_morning_brief(results_by_sector)
+
+        # Ajoute le rapport de perf au brief si donnees disponibles
+        try:
+            stats = await get_performance_stats()
+            if stats["total_signals"] > 0:
+                perf_report = format_performance_report(stats)
+                brief += f"\n\n{perf_report}"
+        except Exception:
+            pass
+
         sent = await send_bourse_brief(brief)
 
         if sent:
@@ -173,22 +159,23 @@ async def run_morning_brief():
         else:
             print("[MAIN] ERREUR envoi morning brief.")
 
-        # Sauvegarde des signaux en base
+        # Sauvegarde des signaux
         for sector, signals in results_by_sector.items():
             for result in signals:
                 ai = result.get("ai", {})
                 quote = result.get("quote", {})
-                sources = ["Yahoo Finance", "Twelve Data"]
                 external = result.get("external_sources", [])
-                sources += [e.get("source", "") for e in external if e.get("source")]
-
+                sources = list(set(
+                    ["Yahoo Finance", "Twelve Data"]
+                    + [e.get("source", "") for e in external if e.get("source")]
+                ))
                 await save_signal(
                     asset=result["symbol"],
                     asset_type="stock",
                     score=result["score"],
                     signals_detected=result["signals"],
                     price=quote.get("price", 0),
-                    sources=list(set(sources)),
+                    sources=sources,
                     ai_analysis=ai.get("catalyseur", ""),
                     entry_price=ai.get("entree"),
                     target_price=ai.get("cible"),
@@ -203,7 +190,7 @@ async def run_morning_brief():
 
 
 async def schedule_morning_brief():
-    """Scheduler du morning brief — se declenche a l'heure configuree."""
+    """Scheduler du morning brief."""
     while True:
         now = datetime.now(timezone.utc)
         target_hour = Config.MORNING_BRIEF_HOUR_UTC
@@ -266,6 +253,14 @@ async def main_loop():
     crypto_task = asyncio.create_task(run_crypto_scanner(on_crypto_signal))
     brief_task = asyncio.create_task(schedule_morning_brief())
     regulatory_task = asyncio.create_task(regulatory_cache_loop())
+    perf_task = asyncio.create_task(run_performance_tracker())
+
+    all_tasks = {
+        "crypto": (crypto_task, lambda: run_crypto_scanner(on_crypto_signal)),
+        "brief": (brief_task, schedule_morning_brief),
+        "regulatory": (regulatory_task, regulatory_cache_loop),
+        "perf": (perf_task, run_performance_tracker),
+    }
 
     heartbeat_count = 0
 
@@ -273,28 +268,16 @@ async def main_loop():
         await asyncio.sleep(60)
         heartbeat_count += 1
 
-        # Surveillance et redemarrage automatique des taches
-        for task, name, factory in [
-            (crypto_task, "crypto", lambda: run_crypto_scanner(on_crypto_signal)),
-            (brief_task, "brief", schedule_morning_brief),
-            (regulatory_task, "regulatory", regulatory_cache_loop),
-        ]:
+        # Surveillance et redemarrage automatique
+        for name, (task, factory) in list(all_tasks.items()):
             if task.done():
                 exc = task.exception() if not task.cancelled() else None
                 if exc:
                     print(f"[MAIN] Tache {name} arretee : {exc}")
                     await log_system("ERROR", name, str(exc))
-
-        # Recreer les taches si necessaire
-        if crypto_task.done():
-            crypto_task = asyncio.create_task(run_crypto_scanner(on_crypto_signal))
-            print("[MAIN] Scanner crypto redemarre.")
-        if brief_task.done():
-            brief_task = asyncio.create_task(schedule_morning_brief())
-            print("[MAIN] Scheduler morning brief redemarre.")
-        if regulatory_task.done():
-            regulatory_task = asyncio.create_task(regulatory_cache_loop())
-            print("[MAIN] Cache reglementaire redemarre.")
+                new_task = asyncio.create_task(factory())
+                all_tasks[name] = (new_task, factory)
+                print(f"[MAIN] Tache {name} redemarre.")
 
         # Heartbeat toutes les heures
         if heartbeat_count % 60 == 0:
@@ -302,7 +285,7 @@ async def main_loop():
             print(f"[MAIN] Heartbeat - {ts}")
             await log_system("INFO", "main", f"Heartbeat - {ts}")
 
-    for task in [crypto_task, brief_task, regulatory_task]:
+    for name, (task, _) in all_tasks.items():
         task.cancel()
         try:
             await task
