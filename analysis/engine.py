@@ -10,7 +10,7 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 async def call_claude(prompt: str) -> str | None:
     """
-    Appelle Claude API (Sonnet) et retourne la réponse texte.
+    Appelle Claude API (Sonnet) et retourne la reponse texte.
     Retourne None en cas d'erreur.
     """
     headers = {
@@ -48,8 +48,7 @@ async def call_claude(prompt: str) -> str | None:
 
 async def analyze_crypto_signal(result: dict) -> dict:
     """
-    Produit une analyse IA complète pour un signal crypto qualifié.
-    Enrichit le dict result avec : ai_analysis, entry, target, stop, ratio, conviction.
+    Produit une analyse IA complete pour un signal crypto qualifie.
     """
     symbol = result["symbol"]
     ticker = result["ticker"]
@@ -65,15 +64,23 @@ async def analyze_crypto_signal(result: dict) -> dict:
     macd = indicators.get("macd")
     sr = indicators.get("support_resistance", {})
 
-    prompt = f"""Tu es un trader quantitatif professionnel. Analyse ce signal crypto de manière factuelle et concise.
+    # Sources externes (news, gouvernementales)
+    external_sources = result.get("external_sources", [])
+    external_context = ""
+    if external_sources:
+        external_context = "\nCATALYSEURS EXTERNES DETECTES :\n"
+        for src in external_sources[:3]:
+            external_context += f"- [{src.get('source')}] {src.get('description', '')}\n"
+
+    prompt = f"""Tu es un trader quantitatif professionnel. Analyse ce signal crypto de maniere factuelle.
 
 ACTIF : {symbol}
-PRIX ACTUEL : ${price:.8f}
+PRIX : ${price:.8f}
 VARIATION 24H : {change_24h:+.2f}%
 VOLUME 24H : ${volume_usdt:,.0f}
 SCORE : {score}/100
 
-SIGNAUX DÉTECTÉS :
+SIGNAUX DETECTES :
 {chr(10).join(f'- {s}' for s in signals)}
 
 INDICATEURS :
@@ -81,32 +88,30 @@ INDICATEURS :
 - MACD crossover haussier : {macd.get('crossover_bullish', False) if macd else 'N/A'}
 - ATR (14) : {atr if atr else 'N/A'}
 - Support : ${sr.get('support', 0):.8f}
-- Résistance : ${sr.get('resistance', 0):.8f}
+- Resistance : ${sr.get('resistance', 0):.8f}
+{external_context}
 
-Réponds UNIQUEMENT avec ce JSON (sans markdown, sans texte avant ou après) :
+Reponds UNIQUEMENT avec ce JSON (sans markdown) :
 {{
-  "analyse": "2 phrases max, factuel, contexte marché uniquement",
+  "analyse": "2 phrases max, factuel, contexte marche uniquement",
   "entree": {price:.8f},
-  "cible": <prix cible calculé sur ATR x2 ou résistance suivante>,
-  "stop": <prix stop calculé sur ATR x1 ou support>,
-  "ratio": <ratio risque/récompense arrondi à 1 décimale>,
+  "cible": <prix cible calcule sur ATR x2 ou resistance suivante>,
+  "stop": <prix stop calcule sur ATR x1 ou support>,
+  "ratio": <ratio risque/recompense arrondi a 1 decimale>,
   "conviction": "FORTE|MOYENNE|FAIBLE",
   "action": "ENTRER|SURVEILLER|EVITER"
 }}
 
-Règles strictes :
-- Entrée = prix actuel
-- Stop = prix actuel - ATR (si ATR disponible) ou support le plus proche
-- Cible = prix actuel + (ATR x 2) ou résistance suivante
+Regles :
+- Stop = prix actuel - ATR ou support le plus proche
+- Cible = prix actuel + (ATR x 2) ou resistance suivante
 - Conviction FORTE uniquement si score >= 85 et >= 4 signaux
-- Conviction FAIBLE si score < 80 ou signaux contradictoires
-- Action EVITER si RSI > 75 (surachat) ou momentum négatif"""
+- Action EVITER si RSI > 75 ou momentum negatif"""
 
     response = await call_claude(prompt)
 
-    # Valeurs par défaut si Claude échoue
     default = {
-        "analyse": f"Signal technique détecté sur {symbol} avec {len(signals)} confirmations.",
+        "analyse": f"Signal technique detecte sur {symbol} avec {len(signals)} confirmations.",
         "entree": round(price, 8),
         "cible": round(price * 1.05, 8),
         "stop": round(price * 0.97, 8),
@@ -120,16 +125,14 @@ Règles strictes :
         return result
 
     try:
-        # Nettoie la réponse au cas où Claude ajoute du markdown
         clean = response.strip()
         if clean.startswith("```"):
             clean = clean.split("```")[1]
             if clean.startswith("json"):
                 clean = clean[4:]
-        parsed = json.loads(clean.strip())
-        result["ai"] = parsed
+        result["ai"] = json.loads(clean.strip())
     except Exception as e:
-        print(f"[ENGINE] Erreur parsing réponse Claude ({symbol}) : {e}")
+        print(f"[ENGINE] Erreur parsing Claude ({symbol}) : {e}")
         result["ai"] = default
 
     return result
@@ -138,18 +141,17 @@ Règles strictes :
 def format_crypto_alert(result: dict) -> str:
     """
     Formate le message Telegram pour une alerte crypto.
-    Respecte exactement le format défini dans le cahier des charges.
     """
     symbol = result["symbol"]
     score = result["score"]
     ticker = result["ticker"]
     signals = result["signals"]
     ai = result.get("ai", {})
+    external = result.get("external_sources", [])
 
     price = ticker.get("price", 0)
     change_24h = ticker.get("change_pct", 0)
     volume_usdt = ticker.get("volume_usdt", 0)
-
     base = symbol.replace("USDT", "")
 
     entree = ai.get("entree", price)
@@ -158,36 +160,42 @@ def format_crypto_alert(result: dict) -> str:
     ratio = ai.get("ratio", 1.7)
     conviction = ai.get("conviction", "MOYENNE")
     action = ai.get("action", "SURVEILLER")
-    analyse = ai.get("analyse", "Signal technique détecté.")
+    analyse = ai.get("analyse", "Signal technique detecte.")
 
-    if entree > 0 and cible > 0:
-        pct_target = round((cible - entree) / entree * 100, 1)
-    else:
-        pct_target = 0
+    pct_target = round((cible - entree) / entree * 100, 1) if entree > 0 else 0
+    pct_stop = round((stop - entree) / entree * 100, 1) if entree > 0 else 0
 
-    if entree > 0 and stop > 0:
-        pct_stop = round((stop - entree) / entree * 100, 1)
-    else:
-        pct_stop = 0
-
-    # Emoji conviction
     conviction_emoji = {"FORTE": "🟢", "MOYENNE": "🟡", "FAIBLE": "🔴"}.get(conviction, "🟡")
     action_emoji = {"ENTRER": "✅", "SURVEILLER": "👁", "EVITER": "❌"}.get(action, "👁")
 
-    signals_text = "\n".join(f"  • {s}" for s in signals)
+    signals_text = "\n".join(f"  . {s}" for s in signals)
+
+    # Sources externes
+    sources_text = "Binance Spot"
+    if external:
+        extra = [e.get("source", "") for e in external[:2]]
+        sources_text += " + " + " + ".join(extra)
+
+    # Catalyseurs externes si presents
+    catalyst_block = ""
+    if external:
+        catalyst_block = "\nCatalyseurs :\n"
+        for e in external[:2]:
+            catalyst_block += f"  . [{e.get('source')}] {e.get('description', '')[:80]}\n"
 
     msg = (
-        f"<b>🔔 CRYPTO SIGNAL — Score {score}/100</b>\n"
-        f"<b>{base} (#{symbol})</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>CRYPTO SIGNAL - Score {score}/100</b>\n"
+        f"<b>{base} ({symbol})</b>\n"
+        f"- - - - - - - - - - - - -\n"
         f"Prix : <b>${price:.6f}</b>\n"
         f"Variation 24h : <b>{change_24h:+.2f}%</b>\n"
         f"Volume 24h : <b>${volume_usdt:,.0f}</b>\n"
-        f"\n<b>Signaux détectés :</b>\n{signals_text}\n"
-        f"\nSources : Binance Spot\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\n<b>Signaux :</b>\n{signals_text}\n"
+        f"{catalyst_block}"
+        f"\nSources : {sources_text}\n"
+        f"- - - - - - - - - - - - -\n"
         f"<b>ANALYSE :</b>\n{analyse}\n"
-        f"\nEntrée : <b>${entree:.6f}</b>\n"
+        f"\nEntree : <b>${entree:.6f}</b>\n"
         f"Cible : <b>${cible:.6f}</b> ({pct_target:+.1f}%)\n"
         f"Stop : <b>${stop:.6f}</b> ({pct_stop:+.1f}%)\n"
         f"Ratio : <b>1:{ratio}</b>\n"
