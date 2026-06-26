@@ -1,4 +1,4 @@
-import aiohttp
+import json
 from datetime import datetime, timezone
 
 from config import Config
@@ -8,9 +8,7 @@ from analysis.engine import call_claude
 # ─── Analyse IA par secteur ───────────────────────────────────────────────────
 
 async def analyze_stock_signal(result: dict) -> dict:
-    """
-    Enrichit un signal bourse avec une analyse IA Claude.
-    """
+    """Enrichit un signal bourse avec une analyse IA Claude."""
     symbol = result["symbol"]
     sector = result["sector"]
     score = result["score"]
@@ -25,8 +23,8 @@ async def analyze_stock_signal(result: dict) -> dict:
     rsi = technical.get("rsi")
     macd = technical.get("macd", {})
 
-    prompt = f"""Tu es un analyste financier professionnel spécialisé en {sector}.
-Analyse ce signal boursier de manière factuelle et concise.
+    prompt = f"""Tu es un analyste financier professionnel specialise en {sector}.
+Analyse ce signal boursier de maniere factuelle et concise.
 
 ACTIF : {symbol}
 SECTEUR : {sector}
@@ -43,24 +41,24 @@ INDICATEURS :
 - RSI (14j) : {rsi if rsi else 'N/A'}
 - MACD crossover : {macd.get('crossover_bullish', False) if macd else 'N/A'}
 
-Réponds UNIQUEMENT avec ce JSON (sans markdown) :
+Reponds UNIQUEMENT avec ce JSON (sans markdown) :
 {{
   "catalyseur": "catalyseur principal factuel en 1 phrase (technique si pas de news)",
-  "timing": "Immédiat|Cette semaine|Ce mois",
+  "timing": "Immediat|Cette semaine|Ce mois",
   "potentiel_hausse": <pourcentage entier>,
   "risque_baisse": <pourcentage entier>,
   "niveau_risque": "FAIBLE|MOYEN|ELEVE|TRES ELEVE",
-  "entree": <prix entrée>,
+  "entree": <prix entree>,
   "cible": <prix cible>,
   "stop": <prix stop>,
   "verdict": "OPPORTUNITE|SURVEILLER|EVITER"
 }}
 
-Règles :
+Regles :
 - Catalyseur uniquement factuel (signal technique = acceptable)
-- Potentiel hausse basé sur résistances techniques
+- Potentiel hausse base sur resistances techniques
 - Stop toujours en dessous du support le plus proche
-- Niveau risque ELEVE si biotech sans données publiées
+- Niveau risque ELEVE si biotech sans donnees publiees
 - Verdict OPPORTUNITE uniquement si score >= 80"""
 
     response = await call_claude(prompt)
@@ -82,7 +80,6 @@ Règles :
         return result
 
     try:
-        import json
         clean = response.strip()
         if clean.startswith("```"):
             clean = clean.split("```")[1]
@@ -98,48 +95,48 @@ Règles :
 # ─── Contexte macro ───────────────────────────────────────────────────────────
 
 async def generate_macro_context(results_by_sector: dict) -> str:
-    """
-    Génère le contexte macro du jour basé sur les signaux détectés.
-    """
+    """Genere le contexte macro du jour base sur les signaux detectes."""
     total_signals = sum(len(v) for v in results_by_sector.values())
     active_sectors = [s for s, v in results_by_sector.items() if v]
 
-    prompt = f"""Tu es un stratégiste de marché senior. Rédige le contexte macro du jour en 3 phrases maximum.
+    prompt = f"""Tu es un strategiste de marche senior. Redige le contexte macro du jour en 2 phrases maximum.
 
-DONNÉES DU SCAN :
-- Signaux qualifiés détectés : {total_signals}
+DONNEES DU SCAN :
+- Signaux qualifies detectes : {total_signals}
 - Secteurs actifs : {', '.join(active_sectors) if active_sectors else 'Aucun'}
 - Date : {datetime.now(timezone.utc).strftime('%d/%m/%Y')}
 
-Règles strictes :
-- Uniquement des faits observables (signaux techniques, activité de marché)
-- Zéro spéculation, zéro opinion
-- Si 0 signaux : indiquer marché calme et consolider
-- 3 phrases maximum
+Regles strictes :
+- Uniquement des faits observables (signaux techniques, activite de marche)
+- Zero speculation, zero opinion
+- Si 0 signaux : indiquer marche calme, consolidation
+- 2 phrases maximum
 - Pas de titre, pas de markdown"""
 
     response = await call_claude(prompt)
 
     if not response:
         if total_signals == 0:
-            return "Marché en phase de consolidation. Aucun signal qualifié détecté ce matin sur l'ensemble des secteurs surveillés. Conditions favorables à l'observation plutôt qu'à l'action."
-        return f"{total_signals} signal(s) qualifié(s) détecté(s) ce matin sur {len(active_sectors)} secteur(s). Activité concentrée sur : {', '.join(active_sectors[:3])}."
+            return "Marche en consolidation. Aucun signal qualifie detecte sur l'ensemble des secteurs surveilles."
+        return f"{total_signals} signal(s) detecte(s) sur {len(active_sectors)} secteur(s) : {', '.join(active_sectors[:3])}."
 
     return response.strip()
 
 
-# ─── Formatage du morning brief ───────────────────────────────────────────────
+# ─── Formatage ────────────────────────────────────────────────────────────────
+
+SEP = "- - - - - - - - - - - - -"
+
 
 def format_sector_block(sector: str, signals: list[dict]) -> str:
     """Formate le bloc d'un secteur pour le morning brief."""
-
     sector_upper = sector.upper()
-    header = f"\n─── {sector_upper} ───"
 
     if not signals:
-        return f"{header}\nAucun signal qualifié."
+        return f"\n<b>{sector_upper}</b>\nAucun signal qualifie.\n"
 
-    blocks = []
+    blocks = [f"\n<b>{sector_upper}</b>"]
+
     for result in sorted(signals, key=lambda x: x["score"], reverse=True):
         symbol = result["symbol"]
         score = result["score"]
@@ -169,19 +166,17 @@ def format_sector_block(sector: str, signals: list[dict]) -> str:
             f"\nCatalyseur : {catalyseur}"
             f"\nTiming : {timing}"
             f"\nPotentiel : +{potentiel}% | Risque : -{risque_down}%"
-            f"\nNiveau de risque : {risque_emoji} {niveau_risque}"
-            f"\nEntrée : ${entree:.2f} | Cible : ${cible:.2f} | Stop : ${stop:.2f}"
+            f"\nRisque : {risque_emoji} {niveau_risque}"
+            f"\nEntree : ${entree:.2f} | Cible : ${cible:.2f} | Stop : ${stop:.2f}"
             f"\nVerdict : {verdict_emoji} <b>{verdict}</b>"
         )
         blocks.append(block)
 
-    return header + "".join(blocks)
+    return "\n".join(blocks) + f"\n{SEP}"
 
 
 async def generate_morning_brief(results_by_sector: dict) -> str:
-    """
-    Génère le morning brief complet pour FussBourse.
-    """
+    """Genere le morning brief complet pour FussBourse."""
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%d/%m/%Y")
 
@@ -193,12 +188,12 @@ async def generate_morning_brief(results_by_sector: dict) -> str:
     # Contexte macro
     macro = await generate_macro_context(results_by_sector)
 
-    # Construction du brief
     header = (
-        f"<b>📊 MORNING BRIEF — {date_str}</b>\n"
-        f"{'═' * 26}\n"
+        f"<b>MORNING BRIEF — {date_str}</b>\n"
+        f"{SEP}\n"
         f"<b>MACRO DU JOUR</b>\n"
         f"{macro}\n"
+        f"{SEP}"
     )
 
     sector_blocks = ""
@@ -208,24 +203,23 @@ async def generate_morning_brief(results_by_sector: dict) -> str:
 
     total = sum(len(v) for v in results_by_sector.values())
     footer = (
-        f"\n{'─' * 26}\n"
-        f"Scan : {total} signal(s) qualifié(s) | "
-        f"Sources : Yahoo Finance + Twelve Data + Claude AI\n"
+        f"\n{SEP}\n"
+        f"Scan : {total} signal(s) | Yahoo Finance + Twelve Data + Claude AI\n"
         f"{now.strftime('%H:%M UTC')}"
     )
 
     return header + sector_blocks + footer
 
 
-# Ordre d'affichage des secteurs dans le brief
+# Ordre d'affichage des secteurs
 SECTORS_ORDER = [
     "IA & Semi-conducteurs",
     "Biotech & Pharma",
     "Quantique",
-    "Défense & Spatial",
+    "Defense & Spatial",
     "Energie IA",
-    "Cybersécurité",
+    "Cybersecurite",
     "Robotique & Automation",
     "Infrastructure IA",
-    "Stockage & Mémoire",
+    "Stockage & Memoire",
 ]
