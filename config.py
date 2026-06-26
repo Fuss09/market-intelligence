@@ -20,8 +20,8 @@ class Config:
     DATABASE_URL = os.getenv("DATABASE_URL")
 
     # Morning brief schedule (UTC — Paris = UTC+2)
-    MORNING_BRIEF_HOUR_UTC = 6       # 08h00 Paris heure d'été
-    MORNING_BRIEF_MINUTE_UTC = 0
+    MORNING_BRIEF_HOUR_UTC = 9       # 08h00 Paris heure d'été
+    MORNING_BRIEF_MINUTE_UTC = 45
 
     # Scoring thresholds
     SIGNAL_SCORE_MIN = 75
