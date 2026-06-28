@@ -9,8 +9,8 @@ from analysis.macro import get_macro_context, apply_macro_filter
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 
-BINANCE_REST = "https://api.binance.com"
-KLINE_INTERVAL = "1h"
+BINANCE_REST = “https://api.binance.com”
+KLINE_INTERVAL = “1h”
 KLINE_LIMIT = 100
 MIN_VOLUME_USDT = 500_000
 SCAN_INTERVAL = 300
@@ -23,61 +23,61 @@ _last_alert: dict[str, float] = {}
 async def fetch_all_usdt_symbols(session: aiohttp.ClientSession) -> list[str]:
 try:
 async with session.get(
-f"{BINANCE_REST}/api/v3/exchangeInfo",
+f”{BINANCE_REST}/api/v3/exchangeInfo”,
 timeout=aiohttp.ClientTimeout(total=30),
 ) as resp:
 data = await resp.json()
 return [
-s["symbol"] for s in data["symbols"]
-if s["quoteAsset"] == "USDT"
-and s["status"] == "TRADING"
-and s["isSpotTradingAllowed"]
+s[“symbol”] for s in data[“symbols”]
+if s[“quoteAsset”] == “USDT”
+and s[“status”] == “TRADING”
+and s[“isSpotTradingAllowed”]
 ]
 except Exception as e:
-print(f"[CRYPTO] ERREUR fetch_all_usdt_symbols : {e}")
+print(f”[CRYPTO] ERREUR fetch_all_usdt_symbols : {e}”)
 return []
 
 async def fetch_tickers_24h(session: aiohttp.ClientSession) -> dict[str, dict]:
 try:
 async with session.get(
-f"{BINANCE_REST}/api/v3/ticker/24hr",
+f”{BINANCE_REST}/api/v3/ticker/24hr”,
 timeout=aiohttp.ClientTimeout(total=30),
 ) as resp:
 data = await resp.json()
 return {
-t["symbol"]: {
-"price": float(t["lastPrice"]),
-"change_pct": float(t["priceChangePercent"]),
-"volume_usdt": float(t["quoteVolume"]),
-"high_24h": float(t["highPrice"]),
-"low_24h": float(t["lowPrice"]),
-"volume_base": float(t["volume"]),
+t[“symbol”]: {
+“price”: float(t[“lastPrice”]),
+“change_pct”: float(t[“priceChangePercent”]),
+“volume_usdt”: float(t[“quoteVolume”]),
+“high_24h”: float(t[“highPrice”]),
+“low_24h”: float(t[“lowPrice”]),
+“volume_base”: float(t[“volume”]),
 }
-for t in data if t["symbol"].endswith("USDT")
+for t in data if t[“symbol”].endswith(“USDT”)
 }
 except Exception as e:
-print(f"[CRYPTO] ERREUR fetch_tickers_24h : {e}")
+print(f”[CRYPTO] ERREUR fetch_tickers_24h : {e}”)
 return {}
 
 async def fetch_klines(session: aiohttp.ClientSession, symbol: str) -> list[dict]:
 try:
 async with session.get(
-f"{BINANCE_REST}/api/v3/klines",
-params={"symbol": symbol, "interval": KLINE_INTERVAL, "limit": KLINE_LIMIT},
+f”{BINANCE_REST}/api/v3/klines”,
+params={“symbol”: symbol, “interval”: KLINE_INTERVAL, “limit”: KLINE_LIMIT},
 timeout=aiohttp.ClientTimeout(total=15),
 ) as resp:
 raw = await resp.json()
 return [
 {
-"open": float(k[1]), "high": float(k[2]),
-"low": float(k[3]), "close": float(k[4]),
-"volume": float(k[5]), "quote_volume": float(k[7]),
-"trades": int(k[8]),
+“open”: float(k[1]), “high”: float(k[2]),
+“low”: float(k[3]), “close”: float(k[4]),
+“volume”: float(k[5]), “quote_volume”: float(k[7]),
+“trades”: int(k[8]),
 }
 for k in raw
 ]
 except Exception as e:
-print(f"[CRYPTO] ERREUR fetch_klines {symbol} : {e}")
+print(f”[CRYPTO] ERREUR fetch_klines {symbol} : {e}”)
 return []
 
 # ─── Indicateurs ──────────────────────────────────────────────────────────────
@@ -127,10 +127,10 @@ and macd_line[-2] < signal_line[-2]
 and macd_line[-1] > signal_line[-1]
 )
 return {
-"macd": round(macd_line[-1], 8),
-"signal": round(signal_line[-1], 8),
-"histogram": round(macd_line[-1] - signal_line[-1], 8),
-"crossover_bullish": crossover,
+“macd”: round(macd_line[-1], 8),
+“signal”: round(signal_line[-1], 8),
+“histogram”: round(macd_line[-1] - signal_line[-1], 8),
+“crossover_bullish”: crossover,
 }
 
 def calc_atr(candles: list[dict], period: int = 14) -> float | None:
@@ -138,58 +138,58 @@ if len(candles) < period + 1:
 return None
 trs = []
 for i in range(1, len(candles)):
-h, l, pc = candles[i]["high"], candles[i]["low"], candles[i-1]["close"]
+h, l, pc = candles[i][“high”], candles[i][“low”], candles[i-1][“close”]
 trs.append(max(h - l, abs(h - pc), abs(l - pc)))
 return round(sum(trs[-period:]) / period, 8)
 
 def calc_volume_spike(candles: list[dict]) -> dict | None:
 if len(candles) < 21:
 return None
-recent = [c["quote_volume"] for c in candles[-21:-1]]
+recent = [c[“quote_volume”] for c in candles[-21:-1]]
 avg = sum(recent) / len(recent)
-current = candles[-1]["quote_volume"]
+current = candles[-1][“quote_volume”]
 if avg == 0:
 return None
 ratio = current / avg
 return {
-"current": round(current, 2),
-"avg_20h": round(avg, 2),
-"ratio": round(ratio, 2),
-"is_spike": ratio >= 2.0,
+“current”: round(current, 2),
+“avg_20h”: round(avg, 2),
+“ratio”: round(ratio, 2),
+“is_spike”: ratio >= 2.0,
 }
 
 def calc_support_resistance(candles: list[dict]) -> dict:
 if len(candles) < 10:
 return {}
 recent = candles[-50:] if len(candles) >= 50 else candles
-highs = [c["high"] for c in recent]
-lows = [c["low"] for c in recent]
-current = candles[-1]["close"]
+highs = [c[“high”] for c in recent]
+lows = [c[“low”] for c in recent]
+current = candles[-1][“close”]
 resistance = max(highs)
 support = min(lows)
 return {
-"support": round(support, 8),
-"resistance": round(resistance, 8),
-"breakout_up": current >= resistance * 0.99,
-"breakdown": current <= support * 1.01,
-"pct_from_resistance": round((resistance - current) / current * 100, 2),
-"pct_from_support": round((current - support) / current * 100, 2),
+“support”: round(support, 8),
+“resistance”: round(resistance, 8),
+“breakout_up”: current >= resistance * 0.99,
+“breakdown”: current <= support * 1.01,
+“pct_from_resistance”: round((resistance - current) / current * 100, 2),
+“pct_from_support”: round((current - support) / current * 100, 2),
 }
 
 def calc_momentum(candles: list[dict]) -> dict:
 result = {}
 if len(candles) >= 2:
-result["momentum_1h"] = round(
-(candles[-1]["close"] - candles[-2]["close"]) / candles[-2]["close"] * 100, 3)
+result[“momentum_1h”] = round(
+(candles[-1][“close”] - candles[-2][“close”]) / candles[-2][“close”] * 100, 3)
 if len(candles) >= 7:
-result["momentum_6h"] = round(
-(candles[-1]["close"] - candles[-7]["close"]) / candles[-7]["close"] * 100, 3)
+result[“momentum_6h”] = round(
+(candles[-1][“close”] - candles[-7][“close”]) / candles[-7][“close”] * 100, 3)
 return result
 
 # ─── Scoring optimise ─────────────────────────────────────────────────────────
 
 def compute_score(indicators: dict, ticker: dict) -> tuple[int, list[str]]:
-"""
+“””
 Scoring optimise pour detecter les signaux AVANT le mouvement.
 
 ```
@@ -373,9 +373,9 @@ return {
 # ─── Boucle principale ────────────────────────────────────────────────────────
 
 async def run_crypto_scanner(signal_callback):
-"""Boucle principale du scanner crypto."""
+“”“Boucle principale du scanner crypto.”””
 global _macro_cache
-print("[CRYPTO] Demarrage du scanner crypto…")
+print(”[CRYPTO] Demarrage du scanner crypto…”)
 
 ```
 headers = {}
